@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-meradOS Heatmap - Stock Market Intelligence
-============================================
-Umfassende Aktienanalyse mit:
-- Interaktive Market Heatmap (Finviz-Style)
-- Sektor-relatives Scoring
-- DCF Fair Value Berechnung
-- News & Sentiment Analyse
+meradOS Heatmap v3.0 - Stock Market Intelligence
+=================================================
+Features:
+- Multi-Source Data (FMP, Finnhub, Alpha Vantage, yfinance)
+- SQLite Cache für Performance
+- Data Quality Scores
+- Interactive Heatmap (Finviz-Style)
+- News & Sentiment Analysis
 - Stock Screener
-- Watchlist & Alerts
+- DCF Fair Value
 
 Start: streamlit run app.py
-Vercel: streamlit run app.py --server.port $PORT
 """
 
 import streamlit as st
@@ -19,14 +19,24 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import yfinance as yf
 import warnings
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
-import json
-import numpy as np
+import os
 
 warnings.filterwarnings('ignore')
+
+# Import Multi-Source Data Providers
+try:
+    from data_providers import (
+        MultiSourceFetcher, get_stock_data, get_quote, get_news, get_sentiment,
+        get_cache_stats, get_api_status, clear_cache, DataSource, DataQuality,
+        FMP_API_KEY, FINNHUB_API_KEY, ALPHA_VANTAGE_API_KEY
+    )
+    MULTI_SOURCE_AVAILABLE = True
+except ImportError:
+    MULTI_SOURCE_AVAILABLE = False
+    import yfinance as yf
 
 # ============================================================================
 # PAGE CONFIG
@@ -38,9 +48,9 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
     menu_items={
-        'Get Help': 'https://github.com/merados/heatmap',
-        'Report a bug': 'https://github.com/merados/heatmap/issues',
-        'About': '# meradOS Heatmap\nStock Market Intelligence Platform'
+        'Get Help': 'https://github.com/maf4711/merados-heatmap',
+        'Report a bug': 'https://github.com/maf4711/merados-heatmap/issues',
+        'About': '# meradOS Heatmap v3.0\nMulti-Source Stock Market Intelligence'
     }
 )
 
@@ -49,9 +59,7 @@ st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
-    * {
-        font-family: 'Inter', sans-serif;
-    }
+    * { font-family: 'Inter', sans-serif; }
 
     .main-header {
         font-size: 2.8rem;
@@ -85,19 +93,27 @@ st.markdown("""
         text-align: center;
     }
 
-    .score-badge {
+    .quality-badge {
         display: inline-block;
-        padding: 0.5rem 1rem;
+        padding: 4px 12px;
         border-radius: 20px;
+        font-size: 0.8rem;
         font-weight: 600;
-        font-size: 0.9rem;
     }
 
-    .score-strong-buy { background: #10b981; color: white; }
-    .score-buy { background: #34d399; color: white; }
-    .score-hold { background: #fbbf24; color: black; }
-    .score-sell { background: #f97316; color: white; }
-    .score-strong-sell { background: #ef4444; color: white; }
+    .quality-high { background: #dcfce7; color: #166534; }
+    .quality-medium { background: #fef3c7; color: #92400e; }
+    .quality-low { background: #fee2e2; color: #991b1b; }
+
+    .source-badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 0.7rem;
+        background: #e5e7eb;
+        color: #374151;
+        margin-left: 8px;
+    }
 
     .news-card {
         background: #f9fafb;
@@ -107,24 +123,8 @@ st.markdown("""
         border-left: 4px solid #667eea;
     }
 
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        background: #f3f4f6;
-        padding: 8px;
-        border-radius: 12px;
-    }
-
-    .stTabs [data-baseweb="tab"] {
-        padding: 12px 24px;
-        background: transparent;
-        border-radius: 8px;
-        font-weight: 500;
-    }
-
-    .stTabs [aria-selected="true"] {
-        background: white;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-    }
+    .sentiment-bullish { color: #10b981; }
+    .sentiment-bearish { color: #ef4444; }
 
     div[data-testid="stSidebar"] {
         background: linear-gradient(180deg, #1f2937 0%, #111827 100%);
@@ -134,53 +134,40 @@ st.markdown("""
         color: white !important;
     }
 
-    .sidebar-logo {
-        font-size: 1.8rem;
-        font-weight: 700;
-        text-align: center;
-        padding: 1rem;
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
+    .api-status {
+        padding: 8px 12px;
+        border-radius: 8px;
+        margin: 4px 0;
+        font-size: 0.85rem;
     }
 
-    .gainers-badge { background: #dcfce7; color: #166534; padding: 4px 12px; border-radius: 20px; }
-    .losers-badge { background: #fee2e2; color: #991b1b; padding: 4px 12px; border-radius: 20px; }
+    .api-active { background: rgba(16, 185, 129, 0.2); }
+    .api-inactive { background: rgba(239, 68, 68, 0.2); }
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# CONSTANTS & DATA
+# CONSTANTS
 # ============================================================================
 
 SECTOR_STOCKS = {
-    'Technology': ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'AVGO', 'ORCL', 'CRM', 'ADBE', 'CSCO', 'INTC', 'AMD', 'IBM', 'QCOM', 'TXN', 'NOW', 'INTU', 'AMAT', 'MU', 'LRCX'],
-    'Financial Services': ['JPM', 'BAC', 'WFC', 'GS', 'MS', 'C', 'BLK', 'SCHW', 'AXP', 'V', 'MA', 'PYPL', 'COF', 'USB', 'PNC'],
-    'Healthcare': ['JNJ', 'UNH', 'PFE', 'MRK', 'ABBV', 'LLY', 'TMO', 'ABT', 'DHR', 'BMY', 'AMGN', 'GILD', 'CVS', 'MDT', 'ISRG'],
-    'Consumer Cyclical': ['AMZN', 'TSLA', 'HD', 'NKE', 'MCD', 'SBUX', 'TGT', 'LOW', 'TJX', 'BKNG', 'MAR', 'GM', 'F', 'ORLY', 'ROST'],
-    'Consumer Defensive': ['WMT', 'PG', 'KO', 'PEP', 'COST', 'MDLZ', 'CL', 'KHC', 'GIS', 'KMB', 'SYY', 'HSY', 'K', 'CAG', 'CPB'],
-    'Communication': ['GOOGL', 'META', 'DIS', 'NFLX', 'CMCSA', 'VZ', 'T', 'TMUS', 'CHTR', 'EA', 'TTWO', 'WBD', 'PARA', 'FOX', 'OMC'],
-    'Energy': ['XOM', 'CVX', 'COP', 'SLB', 'EOG', 'OXY', 'PSX', 'MPC', 'VLO', 'PXD', 'DVN', 'HES', 'HAL', 'BKR', 'FANG'],
-    'Industrials': ['UPS', 'HON', 'UNP', 'BA', 'CAT', 'GE', 'RTX', 'DE', 'LMT', 'MMM', 'FDX', 'NSC', 'CSX', 'EMR', 'ITW'],
+    'Technology': ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'AVGO', 'ORCL', 'CRM', 'ADBE', 'CSCO', 'INTC', 'AMD', 'IBM', 'QCOM', 'TXN'],
+    'Financial': ['JPM', 'BAC', 'WFC', 'GS', 'MS', 'C', 'BLK', 'SCHW', 'AXP', 'V', 'MA', 'PYPL'],
+    'Healthcare': ['JNJ', 'UNH', 'PFE', 'MRK', 'ABBV', 'LLY', 'TMO', 'ABT', 'DHR', 'BMY', 'AMGN', 'GILD'],
+    'Consumer': ['AMZN', 'TSLA', 'HD', 'NKE', 'MCD', 'SBUX', 'WMT', 'TGT', 'COST', 'PG', 'KO', 'PEP'],
+    'Communication': ['GOOGL', 'META', 'DIS', 'NFLX', 'CMCSA', 'VZ', 'T', 'TMUS'],
+    'Energy': ['XOM', 'CVX', 'COP', 'SLB', 'EOG', 'OXY', 'PSX', 'MPC', 'VLO'],
+    'Industrials': ['UPS', 'HON', 'UNP', 'BA', 'CAT', 'GE', 'RTX', 'DE', 'LMT'],
 }
 
 KNOWN_PEERS = {
-    'AAPL': ['MSFT', 'GOOGL', 'META', 'AMZN', 'NVDA', 'TSM', 'AVGO', 'ORCL', 'CRM', 'ADBE'],
-    'MSFT': ['AAPL', 'GOOGL', 'AMZN', 'META', 'ORCL', 'CRM', 'SAP', 'ADBE', 'IBM', 'CSCO'],
-    'GOOGL': ['META', 'MSFT', 'AMZN', 'AAPL', 'NFLX', 'SNAP', 'PINS', 'TTD', 'ROKU'],
-    'META': ['GOOGL', 'SNAP', 'PINS', 'TTD', 'MSFT', 'NFLX', 'ROKU', 'AMZN'],
-    'NVDA': ['AMD', 'INTC', 'QCOM', 'AVGO', 'TXN', 'MU', 'MRVL', 'TSM', 'ASML'],
-    'TSLA': ['F', 'GM', 'RIVN', 'LCID', 'NIO', 'TM', 'HMC'],
-    'JPM': ['BAC', 'WFC', 'C', 'GS', 'MS', 'USB', 'PNC'],
-    'AMZN': ['WMT', 'TGT', 'COST', 'EBAY', 'SHOP', 'MELI'],
-}
-
-SCREENER_PRESETS = {
-    'Value Stocks': {'max_pe': 15, 'min_dividend': 0.02, 'max_debt_equity': 1.0},
-    'Growth Stocks': {'min_revenue_growth': 0.15, 'min_earnings_growth': 0.20},
-    'Dividend Champions': {'min_dividend': 0.03, 'max_payout': 0.70},
-    'Low Volatility': {'max_beta': 1.0, 'min_market_cap': 10e9},
-    'Momentum': {'min_perf_6m': 0.10},
+    'AAPL': ['MSFT', 'GOOGL', 'META', 'AMZN', 'NVDA'],
+    'MSFT': ['AAPL', 'GOOGL', 'AMZN', 'META', 'ORCL'],
+    'GOOGL': ['META', 'MSFT', 'AMZN', 'AAPL', 'NFLX'],
+    'NVDA': ['AMD', 'INTC', 'QCOM', 'AVGO', 'TSM'],
+    'TSLA': ['F', 'GM', 'RIVN', 'NIO', 'TM'],
+    'JPM': ['BAC', 'WFC', 'C', 'GS', 'MS'],
+    'AMZN': ['WMT', 'TGT', 'COST', 'EBAY', 'SHOP'],
 }
 
 # ============================================================================
@@ -188,61 +175,59 @@ SCREENER_PRESETS = {
 # ============================================================================
 
 @st.cache_data(ttl=300)
-def fetch_stock_data(ticker: str) -> Dict[str, Any]:
-    """Holt Aktiendaten von Yahoo Finance"""
+def fetch_stock_data_cached(ticker: str) -> tuple:
+    """Cached wrapper für Stock Data"""
+    if MULTI_SOURCE_AVAILABLE:
+        data, quality = get_stock_data(ticker)
+        return data, quality
+    else:
+        # Fallback zu yfinance
+        return fetch_yfinance_data(ticker), {'overall_score': 70, 'quote': {'source': 'Yahoo Finance'}}
+
+
+def fetch_yfinance_data(ticker: str) -> Dict:
+    """Fallback: yfinance direkt"""
     try:
+        import yfinance as yf
         stock = yf.Ticker(ticker)
         info = stock.info
 
-        # Berechne Änderung
         price = info.get('currentPrice') or info.get('regularMarketPrice', 0)
         prev = info.get('previousClose', price)
-        change_pct = ((price - prev) / prev * 100) if prev and prev > 0 else 0
+        change_pct = ((price - prev) / prev * 100) if prev else 0
 
         return {
             'ticker': ticker.upper(),
             'name': info.get('longName') or info.get('shortName', ticker),
             'price': price,
-            'previous_close': prev,
-            'change': price - prev if prev else 0,
             'change_percent': change_pct,
             'market_cap': info.get('marketCap'),
             'pe_ratio': info.get('trailingPE'),
             'forward_pe': info.get('forwardPE'),
-            'peg_ratio': info.get('pegRatio'),
-            'price_to_book': info.get('priceToBook'),
             'dividend_yield': info.get('dividendYield'),
             'profit_margin': info.get('profitMargins'),
             'roe': info.get('returnOnEquity'),
-            'roa': info.get('returnOnAssets'),
             'revenue_growth': info.get('revenueGrowth'),
-            'earnings_growth': info.get('earningsGrowth'),
             'debt_to_equity': info.get('debtToEquity'),
             'current_ratio': info.get('currentRatio'),
             'free_cashflow': info.get('freeCashflow'),
             'recommendation': info.get('recommendationKey'),
             'target_mean': info.get('targetMeanPrice'),
-            'target_high': info.get('targetHighPrice'),
-            'target_low': info.get('targetLowPrice'),
-            'analyst_count': info.get('numberOfAnalystOpinions'),
             'sector': info.get('sector', 'Unknown'),
             'industry': info.get('industry', 'Unknown'),
             '52w_high': info.get('fiftyTwoWeekHigh'),
             '52w_low': info.get('fiftyTwoWeekLow'),
             'beta': info.get('beta'),
-            'volume': info.get('volume'),
-            'avg_volume': info.get('averageVolume'),
-            'short_ratio': info.get('shortRatio'),
-            'payout_ratio': info.get('payoutRatio'),
         }
-    except Exception as e:
-        return {'ticker': ticker, 'error': str(e)}
+    except:
+        return {'ticker': ticker, 'error': 'Failed to fetch'}
 
 
 @st.cache_data(ttl=300)
 def fetch_historical_data(ticker: str, period: str = '1y') -> pd.DataFrame:
-    """Holt historische Kursdaten"""
+    """Holt historische Daten"""
     try:
+        import yfinance as yf
         stock = yf.Ticker(ticker)
         return stock.history(period=period)
     except:
@@ -250,26 +235,15 @@ def fetch_historical_data(ticker: str, period: str = '1y') -> pd.DataFrame:
 
 
 @st.cache_data(ttl=600)
-def fetch_news(ticker: str) -> List[Dict]:
-    """Holt News für eine Aktie"""
-    try:
-        stock = yf.Ticker(ticker)
-        news = stock.news
-        return news[:10] if news else []
-    except:
-        return []
-
-
-@st.cache_data(ttl=600)
-def fetch_sector_data(sector_stocks: Dict[str, List[str]], max_per_sector: int = 12) -> pd.DataFrame:
-    """Holt Daten für alle Sektor-Aktien"""
+def fetch_sector_data(sector_stocks: Dict, max_per_sector: int = 10) -> pd.DataFrame:
+    """Holt Daten für Heatmap"""
     all_data = []
 
     for sector, tickers in sector_stocks.items():
         for ticker in tickers[:max_per_sector]:
             try:
-                data = fetch_stock_data(ticker)
-                if 'error' not in data and data.get('price'):
+                data, quality = fetch_stock_data_cached(ticker)
+                if data and data.get('price'):
                     all_data.append({
                         'Ticker': ticker,
                         'Name': (data.get('name', ticker) or ticker)[:25],
@@ -278,8 +252,7 @@ def fetch_sector_data(sector_stocks: Dict[str, List[str]], max_per_sector: int =
                         'Change %': data.get('change_percent', 0),
                         'Market Cap': data.get('market_cap', 0),
                         'P/E': data.get('pe_ratio'),
-                        'Volume': data.get('volume', 0),
-                        'Dividend %': (data.get('dividend_yield') or 0) * 100,
+                        'Quality': quality.get('overall_score', 70) if isinstance(quality, dict) else 70,
                     })
             except:
                 continue
@@ -287,11 +260,11 @@ def fetch_sector_data(sector_stocks: Dict[str, List[str]], max_per_sector: int =
     return pd.DataFrame(all_data)
 
 
-def calculate_score(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Berechnet den Score für eine Aktie"""
+def calculate_score(data: Dict) -> Dict:
+    """Berechnet Investment Score"""
     scores = {}
 
-    # Valuation (25 Punkte)
+    # Valuation (25)
     val_score = 0
     pe = data.get('pe_ratio')
     if pe and pe > 0:
@@ -310,7 +283,7 @@ def calculate_score(data: Dict[str, Any]) -> Dict[str, Any]:
 
     scores['valuation'] = min(25, val_score)
 
-    # Profitability (25 Punkte)
+    # Profitability (25)
     prof_score = 0
     pm = data.get('profit_margin')
     if pm:
@@ -326,7 +299,7 @@ def calculate_score(data: Dict[str, Any]) -> Dict[str, Any]:
 
     scores['profitability'] = min(25, prof_score)
 
-    # Growth (20 Punkte)
+    # Growth (20)
     growth_score = 0
     rg = data.get('revenue_growth')
     if rg:
@@ -342,7 +315,7 @@ def calculate_score(data: Dict[str, Any]) -> Dict[str, Any]:
 
     scores['growth'] = min(20, growth_score)
 
-    # Financial Health (15 Punkte)
+    # Health (15)
     health_score = 0
     de = data.get('debt_to_equity')
     if de is not None:
@@ -350,33 +323,29 @@ def calculate_score(data: Dict[str, Any]) -> Dict[str, Any]:
         elif de < 1.0: health_score += 5
         elif de < 2.0: health_score += 2
 
-    cr = data.get('current_ratio')
-    if cr and cr > 1.5:
+    if data.get('current_ratio') and data['current_ratio'] > 1.5:
         health_score += 5
 
     if data.get('free_cashflow') and data['free_cashflow'] > 0:
         health_score += 3
 
-    scores['financial_health'] = min(15, health_score)
+    scores['health'] = min(15, health_score)
 
-    # Dividend (10 Punkte)
+    # Dividend (10)
     div_score = 0
     dy = data.get('dividend_yield')
     if dy:
         if dy > 0.04: div_score += 7
         elif dy > 0.02: div_score += 5
         elif dy > 0: div_score += 3
-
     scores['dividend'] = min(10, div_score)
 
-    # Analyst (5 Punkte)
+    # Analyst (5)
     analyst_score = 0
     rec = data.get('recommendation')
     if rec:
-        rec_lower = rec.lower()
-        if 'buy' in rec_lower: analyst_score = 5 if 'strong' in rec_lower else 4
-        elif 'hold' in rec_lower: analyst_score = 2.5
-
+        if 'buy' in rec.lower(): analyst_score = 5 if 'strong' in rec.lower() else 4
+        elif 'hold' in rec.lower(): analyst_score = 2.5
     scores['analyst'] = analyst_score
 
     # Total
@@ -384,70 +353,59 @@ def calculate_score(data: Dict[str, Any]) -> Dict[str, Any]:
     scores['total'] = total
     scores['percentage'] = round((total / 100) * 100, 1)
 
-    # Rating
-    pct = scores['percentage']
-    if pct >= 75:
+    if scores['percentage'] >= 75:
         scores['rating'] = 'STRONG BUY'
         scores['color'] = '#10b981'
-        scores['class'] = 'score-strong-buy'
-    elif pct >= 60:
+    elif scores['percentage'] >= 60:
         scores['rating'] = 'BUY'
         scores['color'] = '#34d399'
-        scores['class'] = 'score-buy'
-    elif pct >= 45:
+    elif scores['percentage'] >= 45:
         scores['rating'] = 'HOLD'
         scores['color'] = '#fbbf24'
-        scores['class'] = 'score-hold'
-    elif pct >= 30:
+    elif scores['percentage'] >= 30:
         scores['rating'] = 'SELL'
         scores['color'] = '#f97316'
-        scores['class'] = 'score-sell'
     else:
         scores['rating'] = 'STRONG SELL'
         scores['color'] = '#ef4444'
-        scores['class'] = 'score-strong-sell'
 
     return scores
 
 
-def calculate_dcf(data: Dict[str, Any]) -> Dict[str, Any]:
-    """DCF Fair Value Berechnung"""
+def calculate_dcf(data: Dict) -> Dict:
+    """DCF Fair Value"""
     fcf = data.get('free_cashflow')
     market_cap = data.get('market_cap')
     price = data.get('price')
 
     if not fcf or not market_cap or not price or fcf <= 0 or price <= 0:
-        return {'error': 'Nicht genug Daten für DCF'}
+        return {'error': 'Insufficient data for DCF'}
 
     shares = market_cap / price
-    growth_rate = data.get('revenue_growth') or 0.05
-    growth_rate = max(-0.10, min(0.30, growth_rate))
-    discount_rate = 0.10
-    terminal_growth = 0.025
-    years = 5
+    growth = data.get('revenue_growth') or 0.05
+    growth = max(-0.10, min(0.30, growth))
+    discount = 0.10
+    terminal = 0.025
 
-    projected_fcf = []
-    current_fcf = fcf
-    for year in range(1, years + 1):
-        current_fcf = current_fcf * (1 + growth_rate)
-        growth_rate = growth_rate * 0.9
-        projected_fcf.append(current_fcf)
+    projected = []
+    current = fcf
+    for _ in range(5):
+        current *= (1 + growth)
+        growth *= 0.9
+        projected.append(current)
 
-    pv_fcf = sum(cf / ((1 + discount_rate) ** (i + 1)) for i, cf in enumerate(projected_fcf))
+    pv_fcf = sum(cf / ((1 + discount) ** (i + 1)) for i, cf in enumerate(projected))
+    terminal_value = projected[-1] * (1 + terminal) / (discount - terminal)
+    pv_terminal = terminal_value / ((1 + discount) ** 5)
 
-    terminal_fcf = projected_fcf[-1] * (1 + terminal_growth)
-    terminal_value = terminal_fcf / (discount_rate - terminal_growth)
-    pv_terminal = terminal_value / ((1 + discount_rate) ** years)
-
-    enterprise_value = pv_fcf + pv_terminal
-    fair_value = enterprise_value / shares if shares > 0 else 0
+    fair_value = (pv_fcf + pv_terminal) / shares
     upside = ((fair_value / price) - 1) * 100
 
     return {
         'fair_value': round(fair_value, 2),
         'current_price': price,
         'upside_percent': round(upside, 1),
-        'verdict': 'UNTERBEWERTET' if upside > 15 else ('ÜBERBEWERTET' if upside < -15 else 'FAIR')
+        'verdict': 'UNDERVALUED' if upside > 15 else ('OVERVALUED' if upside < -15 else 'FAIR VALUE')
     }
 
 
@@ -456,7 +414,7 @@ def calculate_dcf(data: Dict[str, Any]) -> Dict[str, Any]:
 # ============================================================================
 
 def create_treemap(df: pd.DataFrame) -> go.Figure:
-    """Erstellt eine Treemap-Heatmap"""
+    """Erstellt Heatmap Treemap"""
     if df.empty:
         return go.Figure()
 
@@ -468,49 +426,30 @@ def create_treemap(df: pd.DataFrame) -> go.Figure:
         values='Size',
         color='Change %',
         color_continuous_scale=[
-            [0, '#ef4444'],
-            [0.25, '#f97316'],
-            [0.5, '#fbbf24'],
-            [0.75, '#34d399'],
-            [1, '#10b981']
+            [0, '#ef4444'], [0.25, '#f97316'], [0.5, '#fbbf24'],
+            [0.75, '#34d399'], [1, '#10b981']
         ],
         range_color=[-5, 5],
-        hover_data={
-            'Name': True,
-            'Price': ':.2f',
-            'Change %': ':.2f',
-            'P/E': ':.1f',
-            'Size': False,
-        },
+        hover_data={'Name': True, 'Price': ':.2f', 'Change %': ':.2f', 'P/E': ':.1f', 'Size': False},
     )
 
     fig.update_layout(
         height=650,
         margin=dict(t=30, l=10, r=10, b=10),
-        coloraxis_colorbar=dict(
-            title='Change %',
-            tickformat='.1f',
-            ticksuffix='%',
-        ),
+        coloraxis_colorbar=dict(title='Change %', tickformat='.1f', ticksuffix='%'),
         paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
     )
 
     fig.update_traces(
         textinfo='label+text',
         texttemplate='<b>%{label}</b><br>%{color:.2f}%',
-        hovertemplate='<b>%{label}</b><br>' +
-                      '%{customdata[0]}<br>' +
-                      'Price: $%{customdata[1]:.2f}<br>' +
-                      'Change: %{color:.2f}%<br>' +
-                      'P/E: %{customdata[3]:.1f}<extra></extra>'
     )
 
     return fig
 
 
-def create_sector_performance(df: pd.DataFrame) -> go.Figure:
-    """Sektor-Performance Balkendiagramm"""
+def create_sector_chart(df: pd.DataFrame) -> go.Figure:
+    """Sektor Performance"""
     if df.empty:
         return go.Figure()
 
@@ -518,31 +457,24 @@ def create_sector_performance(df: pd.DataFrame) -> go.Figure:
     colors = ['#10b981' if x > 0 else '#ef4444' for x in sector_perf.values]
 
     fig = go.Figure(go.Bar(
-        x=sector_perf.values,
-        y=sector_perf.index,
-        orientation='h',
+        x=sector_perf.values, y=sector_perf.index, orientation='h',
         marker_color=colors,
         text=[f'{x:+.2f}%' for x in sector_perf.values],
-        textposition='outside',
-        textfont=dict(size=12, color='#374151')
+        textposition='outside'
     ))
 
     fig.update_layout(
-        title=dict(text='Sector Performance', font=dict(size=16)),
-        xaxis_title='Average Change %',
-        yaxis_title='',
+        title='Sector Performance',
         height=350,
         margin=dict(l=120, r=60, t=50, b=40),
         paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        xaxis=dict(gridcolor='#e5e7eb', zerolinecolor='#9ca3af'),
     )
 
     return fig
 
 
 def create_price_chart(ticker: str, period: str = '1y') -> go.Figure:
-    """Erstellt Preischart"""
+    """Price Chart mit Volume"""
     hist = fetch_historical_data(ticker, period)
     if hist.empty:
         return go.Figure()
@@ -550,43 +482,37 @@ def create_price_chart(ticker: str, period: str = '1y') -> go.Figure:
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         vertical_spacing=0.03, row_heights=[0.7, 0.3])
 
-    # Candlestick
     fig.add_trace(go.Candlestick(
         x=hist.index, open=hist['Open'], high=hist['High'],
         low=hist['Low'], close=hist['Close'], name='Price',
         increasing_line_color='#10b981', decreasing_line_color='#ef4444'
     ), row=1, col=1)
 
-    # SMAs
     if len(hist) > 20:
-        hist['SMA20'] = hist['Close'].rolling(window=20).mean()
+        hist['SMA20'] = hist['Close'].rolling(20).mean()
         fig.add_trace(go.Scatter(x=hist.index, y=hist['SMA20'], name='SMA 20',
                                  line=dict(color='#f97316', width=1.5)), row=1, col=1)
     if len(hist) > 50:
-        hist['SMA50'] = hist['Close'].rolling(window=50).mean()
+        hist['SMA50'] = hist['Close'].rolling(50).mean()
         fig.add_trace(go.Scatter(x=hist.index, y=hist['SMA50'], name='SMA 50',
                                  line=dict(color='#3b82f6', width=1.5)), row=1, col=1)
 
-    # Volume
     colors = ['#10b981' if hist['Close'].iloc[i] >= hist['Open'].iloc[i] else '#ef4444'
               for i in range(len(hist))]
     fig.add_trace(go.Bar(x=hist.index, y=hist['Volume'], name='Volume',
                          marker_color=colors, opacity=0.7), row=2, col=1)
 
     fig.update_layout(
-        height=500,
-        xaxis_rangeslider_visible=False,
-        showlegend=True,
+        height=500, xaxis_rangeslider_visible=False, showlegend=True,
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
         paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
     )
 
     return fig
 
 
 def create_comparison_chart(tickers: List[str], period: str = '6mo') -> go.Figure:
-    """Erstellt Vergleichschart (normalisiert)"""
+    """Vergleichs-Chart"""
     fig = go.Figure()
     colors = px.colors.qualitative.Set2
 
@@ -600,13 +526,9 @@ def create_comparison_chart(tickers: List[str], period: str = '6mo') -> go.Figur
             ))
 
     fig.update_layout(
-        title='Performance Comparison (Normalized to 100)',
-        xaxis_title='Date',
-        yaxis_title='Normalized Price',
-        height=400,
-        hovermode='x unified',
+        title='Performance Comparison (Normalized)',
+        height=400, hovermode='x unified',
         paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
     )
 
     return fig
@@ -616,12 +538,12 @@ def create_comparison_chart(tickers: List[str], period: str = '6mo') -> go.Figur
 # SIDEBAR
 # ============================================================================
 
-st.sidebar.markdown('<div class="sidebar-logo">🔥 meradOS</div>', unsafe_allow_html=True)
+st.sidebar.markdown('<div style="font-size:1.8rem;font-weight:700;text-align:center;padding:1rem;background:linear-gradient(90deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">🔥 meradOS</div>', unsafe_allow_html=True)
 st.sidebar.markdown("---")
 
 page = st.sidebar.radio(
     "Navigation",
-    ["🗺️ Heatmap", "📊 Analyse", "🔍 Screener", "📰 News", "📋 Watchlist"],
+    ["🗺️ Heatmap", "📊 Analysis", "📰 News", "🔍 Screener", "📋 Watchlist", "⚙️ Settings"],
     index=0
 )
 
@@ -630,28 +552,41 @@ st.sidebar.markdown("### Quick Search")
 quick_ticker = st.sidebar.text_input("Ticker", placeholder="AAPL, MSFT...")
 
 if quick_ticker:
-    st.sidebar.markdown("---")
-    data = fetch_stock_data(quick_ticker.upper())
-    if 'error' not in data:
+    data, quality = fetch_stock_data_cached(quick_ticker.upper())
+    if data and data.get('price'):
         change = data.get('change_percent', 0)
         color = '#10b981' if change >= 0 else '#ef4444'
+        q_score = quality.get('overall_score', 70) if isinstance(quality, dict) else 70
         st.sidebar.markdown(f"""
         **{data.get('name', quick_ticker)[:20]}**
 
         Price: **${data.get('price', 0):.2f}**
 
         Change: <span style="color:{color}">{change:+.2f}%</span>
+
+        Data Quality: **{q_score:.0f}/100**
         """, unsafe_allow_html=True)
+
+# API Status in Sidebar
+if MULTI_SOURCE_AVAILABLE:
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📡 Data Sources")
+
+    api_status = get_api_status()
+    for api, info in api_status.items():
+        status = "✅" if info['available'] else "❌"
+        css_class = "api-active" if info['available'] else "api-inactive"
+        st.sidebar.markdown(f'<div class="api-status {css_class}">{status} {api.upper()}</div>', unsafe_allow_html=True)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
-<small style="color: #9ca3af;">
-**meradOS Heatmap** v2.0
+<small style="color:#9ca3af;">
+**meradOS Heatmap** v3.0
 
-Data: Yahoo Finance
-100% Free & Open Source
+Multi-Source Data Engine
+SQLite Cache • Quality Scores
 
-[GitHub](https://github.com/merados/heatmap)
+[GitHub](https://github.com/maf4711/merados-heatmap)
 </small>
 """, unsafe_allow_html=True)
 
@@ -661,7 +596,7 @@ Data: Yahoo Finance
 
 if page == "🗺️ Heatmap":
     st.markdown('<p class="main-header">🔥 meradOS Heatmap</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Real-time Market Intelligence • Sector Performance • Stock Screening</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Multi-Source Market Intelligence • Real-time Data Quality Tracking</p>', unsafe_allow_html=True)
 
     with st.spinner('Loading market data...'):
         df = fetch_sector_data(SECTOR_STOCKS, max_per_sector=10)
@@ -673,51 +608,26 @@ if page == "🗺️ Heatmap":
         gainers = len(df[df['Change %'] > 0])
         losers = len(df[df['Change %'] < 0])
         avg_change = df['Change %'].mean()
+        avg_quality = df['Quality'].mean()
         best = df.loc[df['Change %'].idxmax()] if not df.empty else None
-        worst = df.loc[df['Change %'].idxmin()] if not df.empty else None
 
         with col1:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div style="font-size: 2rem; font-weight: 700;">{gainers}</div>
-                <div>📈 Gainers</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card"><div style="font-size:2rem;font-weight:700;">{gainers}</div><div>📈 Gainers</div></div>', unsafe_allow_html=True)
 
         with col2:
-            st.markdown(f"""
-            <div class="metric-card" style="background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);">
-                <div style="font-size: 2rem; font-weight: 700;">{losers}</div>
-                <div>📉 Losers</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card" style="background:linear-gradient(135deg,#ef4444,#dc2626);"><div style="font-size:2rem;font-weight:700;">{losers}</div><div>📉 Losers</div></div>', unsafe_allow_html=True)
 
         with col3:
             color = '#10b981' if avg_change >= 0 else '#ef4444'
-            st.markdown(f"""
-            <div class="metric-card-neutral">
-                <div style="font-size: 2rem; font-weight: 700; color: {color};">{avg_change:+.2f}%</div>
-                <div>Ø Change</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card-neutral"><div style="font-size:2rem;font-weight:700;color:{color};">{avg_change:+.2f}%</div><div>Ø Change</div></div>', unsafe_allow_html=True)
 
         with col4:
-            if best is not None:
-                st.markdown(f"""
-                <div class="metric-card-neutral">
-                    <div style="font-size: 1.5rem; font-weight: 700; color: #10b981;">{best['Ticker']}</div>
-                    <div>🏆 +{best['Change %']:.2f}%</div>
-                </div>
-                """, unsafe_allow_html=True)
+            q_class = 'quality-high' if avg_quality >= 80 else ('quality-medium' if avg_quality >= 60 else 'quality-low')
+            st.markdown(f'<div class="metric-card-neutral"><div style="font-size:2rem;font-weight:700;">{avg_quality:.0f}</div><div>Data Quality</div></div>', unsafe_allow_html=True)
 
         with col5:
-            if worst is not None:
-                st.markdown(f"""
-                <div class="metric-card-neutral">
-                    <div style="font-size: 1.5rem; font-weight: 700; color: #ef4444;">{worst['Ticker']}</div>
-                    <div>📉 {worst['Change %']:.2f}%</div>
-                </div>
-                """, unsafe_allow_html=True)
+            if best is not None:
+                st.markdown(f'<div class="metric-card-neutral"><div style="font-size:1.5rem;font-weight:700;color:#10b981;">{best["Ticker"]}</div><div>🏆 +{best["Change %"]:.2f}%</div></div>', unsafe_allow_html=True)
 
         st.markdown("---")
 
@@ -729,63 +639,72 @@ if page == "🗺️ Heatmap":
         col1, col2 = st.columns([1, 1])
 
         with col1:
-            fig = create_sector_performance(df)
+            fig = create_sector_chart(df)
             st.plotly_chart(fig, use_container_width=True)
 
         with col2:
             st.markdown("#### 📊 Top & Flop")
-
             tab1, tab2 = st.tabs(["🟢 Top 10", "🔴 Flop 10"])
 
             with tab1:
-                top = df.nlargest(10, 'Change %')[['Ticker', 'Name', 'Change %', 'Price', 'P/E']]
+                top = df.nlargest(10, 'Change %')[['Ticker', 'Name', 'Change %', 'Price', 'Quality']]
                 st.dataframe(top, hide_index=True, use_container_width=True)
 
             with tab2:
-                bottom = df.nsmallest(10, 'Change %')[['Ticker', 'Name', 'Change %', 'Price', 'P/E']]
+                bottom = df.nsmallest(10, 'Change %')[['Ticker', 'Name', 'Change %', 'Price', 'Quality']]
                 st.dataframe(bottom, hide_index=True, use_container_width=True)
 
 
-elif page == "📊 Analyse":
+elif page == "📊 Analysis":
     st.markdown('<p class="main-header">📊 Stock Analysis</p>', unsafe_allow_html=True)
 
     col1, col2 = st.columns([3, 1])
     with col1:
-        ticker = st.text_input("Enter Ticker", value="AAPL", help="e.g., AAPL, MSFT, GOOGL").upper()
+        ticker = st.text_input("Enter Ticker", value="AAPL").upper()
     with col2:
-        period = st.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
+        period = st.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y"], index=3)
 
     if ticker:
         with st.spinner(f'Loading {ticker}...'):
-            data = fetch_stock_data(ticker)
+            data, quality = fetch_stock_data_cached(ticker)
 
-        if 'error' in data:
-            st.error(f"Error: {data.get('error')}")
-        else:
+        if data and data.get('price'):
             scores = calculate_score(data)
             dcf = calculate_dcf(data)
 
             # Header
-            col1, col2, col3 = st.columns([2, 1, 1])
+            col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
 
             with col1:
                 st.markdown(f"### {data.get('name', ticker)}")
                 st.caption(f"{data.get('sector', '')} • {data.get('industry', '')}")
 
             with col2:
-                price = data.get('price', 0)
                 change = data.get('change_percent', 0)
-                st.metric("Price", f"${price:.2f}", f"{change:+.2f}%")
+                st.metric("Price", f"${data.get('price', 0):.2f}", f"{change:+.2f}%")
 
             with col3:
+                q_score = quality.get('overall_score', 70) if isinstance(quality, dict) else 70
+                q_source = quality.get('quote', {}).get('source', 'Unknown') if isinstance(quality, dict) else 'Yahoo'
+                q_class = 'quality-high' if q_score >= 80 else ('quality-medium' if q_score >= 60 else 'quality-low')
                 st.markdown(f"""
-                <div class="score-badge {scores['class']}">{scores['percentage']:.0f}% • {scores['rating']}</div>
+                **Data Quality**
+                <span class="quality-badge {q_class}">{q_score:.0f}/100</span>
+                <span class="source-badge">{q_source}</span>
+                """, unsafe_allow_html=True)
+
+            with col4:
+                st.markdown(f"""
+                <div style="background:{scores['color']};padding:1rem;border-radius:10px;text-align:center;color:white;">
+                    <div style="font-size:1.5rem;font-weight:700;">{scores['percentage']:.0f}%</div>
+                    <div>{scores['rating']}</div>
+                </div>
                 """, unsafe_allow_html=True)
 
             st.markdown("---")
 
             # Tabs
-            tab1, tab2, tab3, tab4 = st.tabs(["📈 Chart", "📊 Metrics", "💎 Valuation", "👥 Peers"])
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Chart", "📊 Metrics", "💎 DCF", "👥 Peers", "📰 News"])
 
             with tab1:
                 fig = create_price_chart(ticker, period)
@@ -799,7 +718,6 @@ elif page == "📊 Analyse":
                     st.metric("P/E Ratio", f"{data.get('pe_ratio', 'N/A'):.1f}" if data.get('pe_ratio') else "N/A")
                     st.metric("Forward P/E", f"{data.get('forward_pe', 'N/A'):.1f}" if data.get('forward_pe') else "N/A")
                     st.metric("PEG Ratio", f"{data.get('peg_ratio', 'N/A'):.2f}" if data.get('peg_ratio') else "N/A")
-                    st.metric("P/B Ratio", f"{data.get('price_to_book', 'N/A'):.2f}" if data.get('price_to_book') else "N/A")
 
                 with col2:
                     st.markdown("#### 📊 Profitability")
@@ -812,8 +730,10 @@ elif page == "📊 Analyse":
 
                 with col3:
                     st.markdown("#### 🏦 Health")
-                    st.metric("Debt/Equity", f"{data.get('debt_to_equity', 'N/A'):.1f}" if data.get('debt_to_equity') else "N/A")
-                    st.metric("Current Ratio", f"{data.get('current_ratio', 'N/A'):.2f}" if data.get('current_ratio') else "N/A")
+                    de = data.get('debt_to_equity')
+                    st.metric("Debt/Equity", f"{de:.1f}" if de else "N/A")
+                    cr = data.get('current_ratio')
+                    st.metric("Current Ratio", f"{cr:.2f}" if cr else "N/A")
                     fcf = data.get('free_cashflow')
                     st.metric("Free Cash Flow", f"${fcf/1e9:.1f}B" if fcf else "N/A")
 
@@ -827,13 +747,12 @@ elif page == "📊 Analyse":
                     with col2:
                         st.metric("Current Price", f"${dcf['current_price']:.2f}")
                     with col3:
-                        st.metric("Upside", f"{dcf['upside_percent']:+.1f}%")
+                        st.metric("Upside/Downside", f"{dcf['upside_percent']:+.1f}%")
 
-                    verdict_colors = {'UNTERBEWERTET': '#10b981', 'ÜBERBEWERTET': '#ef4444', 'FAIR': '#fbbf24'}
+                    verdict_colors = {'UNDERVALUED': '#10b981', 'OVERVALUED': '#ef4444', 'FAIR VALUE': '#fbbf24'}
                     st.markdown(f"""
-                    <div style="background: {verdict_colors.get(dcf['verdict'], '#fbbf24')};
-                                padding: 1rem; border-radius: 12px; text-align: center; color: white; margin-top: 1rem;">
-                        <h3 style="margin: 0;">{dcf['verdict']}</h3>
+                    <div style="background:{verdict_colors.get(dcf['verdict'], '#fbbf24')};padding:1rem;border-radius:12px;text-align:center;color:white;margin-top:1rem;">
+                        <h3 style="margin:0;">{dcf['verdict']}</h3>
                     </div>
                     """, unsafe_allow_html=True)
 
@@ -843,8 +762,123 @@ elif page == "📊 Analyse":
                     compare_tickers = [ticker] + peers[:5]
                     fig = create_comparison_chart(compare_tickers, '6mo')
                     st.plotly_chart(fig, use_container_width=True)
+
+                    # Peer Comparison Table
+                    peer_data = []
+                    for p in peers[:6]:
+                        p_data, _ = fetch_stock_data_cached(p)
+                        if p_data and p_data.get('price'):
+                            peer_data.append({
+                                'Ticker': p,
+                                'Price': f"${p_data.get('price', 0):.2f}",
+                                'P/E': p_data.get('pe_ratio'),
+                                'ROE %': (p_data.get('roe') or 0) * 100,
+                            })
+                    if peer_data:
+                        st.dataframe(pd.DataFrame(peer_data), hide_index=True, use_container_width=True)
                 else:
-                    st.info("No peer data available for this ticker.")
+                    st.info("No peer data available.")
+
+            with tab5:
+                if MULTI_SOURCE_AVAILABLE:
+                    news = get_news(ticker)
+                    sentiment = get_sentiment(ticker)
+
+                    if sentiment:
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            bullish = sentiment.get('bullish_percent', 50)
+                            st.metric("🐂 Bullish", f"{bullish:.1f}%")
+                        with col2:
+                            bearish = sentiment.get('bearish_percent', 50)
+                            st.metric("🐻 Bearish", f"{bearish:.1f}%")
+                        with col3:
+                            buzz = sentiment.get('buzz_score', 0)
+                            st.metric("📢 Buzz Score", f"{buzz:.2f}")
+                        st.markdown("---")
+
+                    if news:
+                        for n in news[:5]:
+                            st.markdown(f"""
+                            <div class="news-card">
+                                <strong>{n.get('title', 'No title')}</strong><br>
+                                <small style="color:#6b7280;">{n.get('source', '')} • {n.get('published', '')[:10]}</small><br>
+                                <a href="{n.get('url', '#')}" target="_blank">Read more →</a>
+                            </div>
+                            """, unsafe_allow_html=True)
+                    else:
+                        st.info("No news available.")
+                else:
+                    st.warning("News requires API keys. See Settings.")
+
+
+elif page == "📰 News":
+    st.markdown('<p class="main-header">📰 Market News</p>', unsafe_allow_html=True)
+
+    ticker = st.text_input("Ticker for News", value="AAPL").upper()
+
+    if MULTI_SOURCE_AVAILABLE and ticker:
+        with st.spinner('Loading news & sentiment...'):
+            news = get_news(ticker)
+            sentiment = get_sentiment(ticker)
+
+        if sentiment:
+            st.markdown("### 🎭 Sentiment Analysis")
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+                bullish = sentiment.get('bullish_percent', 0)
+                st.markdown(f"""
+                <div class="metric-card" style="background:#10b981;">
+                    <div style="font-size:2rem;font-weight:700;">{bullish:.1f}%</div>
+                    <div>🐂 Bullish</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with col2:
+                bearish = sentiment.get('bearish_percent', 0)
+                st.markdown(f"""
+                <div class="metric-card" style="background:#ef4444;">
+                    <div style="font-size:2rem;font-weight:700;">{bearish:.1f}%</div>
+                    <div>🐻 Bearish</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with col3:
+                articles = sentiment.get('articles_in_week', 0)
+                st.markdown(f"""
+                <div class="metric-card-neutral">
+                    <div style="font-size:2rem;font-weight:700;">{articles}</div>
+                    <div>📰 Articles/Week</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with col4:
+                buzz = sentiment.get('buzz_score', 0)
+                st.markdown(f"""
+                <div class="metric-card-neutral">
+                    <div style="font-size:2rem;font-weight:700;">{buzz:.2f}</div>
+                    <div>📢 Buzz Score</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.markdown("---")
+
+        st.markdown("### 📰 Latest News")
+        if news:
+            for n in news:
+                st.markdown(f"""
+                <div class="news-card">
+                    <strong>{n.get('title', 'No title')}</strong><br>
+                    <small style="color:#6b7280;">{n.get('source', '')} • {n.get('published', '')[:10]}</small><br>
+                    {n.get('text', '')[:150]}...<br>
+                    <a href="{n.get('url', '#')}" target="_blank">Read more →</a>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("No news available.")
+    else:
+        st.warning("News feature requires API keys (Finnhub/FMP). See Settings page.")
 
 
 elif page == "🔍 Screener":
@@ -853,57 +887,43 @@ elif page == "🔍 Screener":
     col1, col2 = st.columns([1, 3])
 
     with col1:
-        st.markdown("#### Presets")
-        preset = st.selectbox("Quick Filter", ["Custom"] + list(SCREENER_PRESETS.keys()))
-
         st.markdown("#### Filters")
         max_pe = st.slider("Max P/E", 0, 100, 50)
         min_div = st.slider("Min Dividend %", 0.0, 10.0, 0.0, 0.5)
-        min_growth = st.slider("Min Revenue Growth %", -50, 100, 0)
+        min_roe = st.slider("Min ROE %", 0, 50, 0)
+        sectors = st.multiselect("Sectors", list(SECTOR_STOCKS.keys()), default=list(SECTOR_STOCKS.keys()))
 
     with col2:
-        with st.spinner('Screening stocks...'):
-            df = fetch_sector_data(SECTOR_STOCKS, max_per_sector=8)
+        with st.spinner('Screening...'):
+            df = fetch_sector_data({k: v for k, v in SECTOR_STOCKS.items() if k in sectors}, max_per_sector=8)
 
         if not df.empty:
-            # Apply filters
-            filtered = df.copy()
+            # Fetch additional data for filtering
+            screened = []
+            for _, row in df.iterrows():
+                data, _ = fetch_stock_data_cached(row['Ticker'])
+                if data:
+                    pe = data.get('pe_ratio') or 999
+                    div = (data.get('dividend_yield') or 0) * 100
+                    roe = (data.get('roe') or 0) * 100
 
-            if max_pe < 50:
-                filtered = filtered[filtered['P/E'].fillna(999) <= max_pe]
+                    if pe <= max_pe and div >= min_div and roe >= min_roe:
+                        screened.append({
+                            'Ticker': row['Ticker'],
+                            'Name': row['Name'],
+                            'Price': row['Price'],
+                            'Change %': row['Change %'],
+                            'P/E': pe if pe < 999 else None,
+                            'Div %': div,
+                            'ROE %': roe,
+                        })
 
-            if min_div > 0:
-                filtered = filtered[filtered['Dividend %'] >= min_div]
-
-            st.markdown(f"**Found {len(filtered)} stocks matching criteria**")
-
-            st.dataframe(
-                filtered.sort_values('Change %', ascending=False),
-                use_container_width=True,
-                hide_index=True
-            )
-
-
-elif page == "📰 News":
-    st.markdown('<p class="main-header">📰 Market News</p>', unsafe_allow_html=True)
-
-    ticker = st.text_input("Ticker for News", value="AAPL").upper()
-
-    if ticker:
-        with st.spinner('Loading news...'):
-            news = fetch_news(ticker)
-
-        if news:
-            for item in news:
-                st.markdown(f"""
-                <div class="news-card">
-                    <strong>{item.get('title', 'No title')}</strong><br>
-                    <small style="color: #6b7280;">{item.get('publisher', '')} • {datetime.fromtimestamp(item.get('providerPublishTime', 0)).strftime('%Y-%m-%d %H:%M')}</small>
-                    <br><a href="{item.get('link', '#')}" target="_blank">Read more →</a>
-                </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.info("No news available for this ticker.")
+            if screened:
+                result_df = pd.DataFrame(screened).sort_values('Change %', ascending=False)
+                st.markdown(f"**Found {len(result_df)} stocks**")
+                st.dataframe(result_df, hide_index=True, use_container_width=True)
+            else:
+                st.info("No stocks match your criteria.")
 
 
 elif page == "📋 Watchlist":
@@ -926,15 +946,17 @@ elif page == "📋 Watchlist":
     if st.session_state.watchlist:
         watchlist_data = []
         for ticker in st.session_state.watchlist:
-            data = fetch_stock_data(ticker)
-            if 'error' not in data:
+            data, quality = fetch_stock_data_cached(ticker)
+            if data and data.get('price'):
                 scores = calculate_score(data)
+                q_score = quality.get('overall_score', 70) if isinstance(quality, dict) else 70
                 watchlist_data.append({
                     'Ticker': ticker,
                     'Name': (data.get('name', ticker) or ticker)[:25],
                     'Price': f"${data.get('price', 0):.2f}",
                     'Change': f"{data.get('change_percent', 0):+.2f}%",
                     'Score': f"{scores['percentage']:.0f}%",
+                    'Quality': f"{q_score:.0f}",
                     'Rating': scores['rating'],
                 })
 
@@ -942,8 +964,101 @@ elif page == "📋 Watchlist":
             df = pd.DataFrame(watchlist_data)
             st.dataframe(df, use_container_width=True, hide_index=True)
 
+            # Remove buttons
+            st.markdown("#### Remove from Watchlist")
+            cols = st.columns(min(len(st.session_state.watchlist), 6))
+            for i, ticker in enumerate(st.session_state.watchlist[:6]):
+                with cols[i]:
+                    if st.button(f"🗑️ {ticker}", key=f"del_{ticker}"):
+                        st.session_state.watchlist.remove(ticker)
+                        st.rerun()
+
+            st.markdown("---")
             fig = create_comparison_chart(st.session_state.watchlist[:8], '3mo')
             st.plotly_chart(fig, use_container_width=True)
+
+
+elif page == "⚙️ Settings":
+    st.markdown('<p class="main-header">⚙️ Settings</p>', unsafe_allow_html=True)
+
+    st.markdown("### 🔑 API Keys")
+    st.markdown("""
+    Configure API keys for better data quality. All APIs have free tiers.
+
+    Set environment variables or create a `.env` file:
+    """)
+
+    st.code("""
+# .env file
+FMP_API_KEY=your_key_here          # financialmodelingprep.com (250/day free)
+FINNHUB_API_KEY=your_key_here      # finnhub.io (60/min free)
+ALPHA_VANTAGE_API_KEY=your_key_here # alphavantage.co (25/day free)
+    """, language="bash")
+
+    st.markdown("### 📡 API Status")
+
+    if MULTI_SOURCE_AVAILABLE:
+        status = get_api_status()
+
+        for api, info in status.items():
+            col1, col2, col3 = st.columns([1, 2, 2])
+
+            with col1:
+                st.markdown(f"**{api.upper()}**")
+
+            with col2:
+                if info['available']:
+                    st.success("✅ Connected")
+                else:
+                    st.error("❌ Not configured")
+
+            with col3:
+                stats = info.get('stats', {})
+                if stats:
+                    st.caption(f"Requests today: {stats.get('requests_today', 0)}")
+    else:
+        st.warning("Multi-source providers not loaded. Using yfinance only.")
+
+    st.markdown("---")
+
+    st.markdown("### 🗑️ Cache Management")
+
+    if MULTI_SOURCE_AVAILABLE:
+        cache_stats = get_cache_stats()
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Cache Statistics:**")
+            for table, count in cache_stats.items():
+                st.caption(f"{table}: {count} entries")
+
+        with col2:
+            if st.button("🗑️ Clear All Cache", type="primary"):
+                clear_cache()
+                st.success("Cache cleared!")
+                st.rerun()
+
+    st.markdown("---")
+
+    st.markdown("### ℹ️ About")
+    st.markdown("""
+    **meradOS Heatmap v3.0**
+
+    Multi-source stock market intelligence platform with:
+    - 🔄 Automatic data source fallback
+    - 💾 SQLite caching for performance
+    - ⭐ Data quality scoring
+    - 📊 Real-time market heatmap
+    - 📰 News & sentiment analysis
+
+    **Data Priority:**
+    1. Financial Modeling Prep (SEC data - highest quality)
+    2. Finnhub (News & Sentiment)
+    3. Alpha Vantage
+    4. Yahoo Finance (fallback)
+
+    [GitHub](https://github.com/maf4711/merados-heatmap) • MIT License
+    """)
 
 
 # ============================================================================
@@ -952,8 +1067,8 @@ elif page == "📋 Watchlist":
 
 st.markdown("---")
 st.markdown("""
-<div style="text-align: center; color: #9ca3af; padding: 1rem;">
-    <small>🔥 <strong>meradOS Heatmap</strong> • Built with Streamlit & Plotly • Data: Yahoo Finance •
-    <a href="https://github.com/merados/heatmap" style="color: #667eea;">GitHub</a></small>
+<div style="text-align:center;color:#9ca3af;padding:1rem;">
+    <small>🔥 <strong>meradOS Heatmap</strong> v3.0 • Multi-Source Data Engine •
+    <a href="https://github.com/maf4711/merados-heatmap" style="color:#667eea;">GitHub</a></small>
 </div>
 """, unsafe_allow_html=True)
