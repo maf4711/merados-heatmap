@@ -1,0 +1,28 @@
+/** meradOS Global Styles — import in any project */
+
+:root {
+  --brand-400: #00d4ff;
+  --bg: #050508;
+  --surface: #0a0a0f;
+  --border: rgba(255, 255, 255, 0.04);
+  --text-primary: rgba(255, 255, 255, 0.88);
+  --text-secondary: rgba(255, 255, 255, 0.45);
+  --text-tertiary: rgba(255, 255, 255, 0.2);
+  --success: #34d399;
+  --warning: #f5a623;
+  --error: #ef4444;
+  --info: #3b82f6;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: rgba(0, 212, 255, 0.25);
+  color: #fff;
+}
