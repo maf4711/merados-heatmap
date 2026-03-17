@@ -1,0 +1,14 @@
+[project]
+name = "merados-heatmap"
+version = "3.0.0"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["data_providers", "routes", "utils"]

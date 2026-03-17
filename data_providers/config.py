@@ -2,7 +2,10 @@
 meradOS Heatmap - Data Provider Configuration
 """
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 # API Keys (aus Environment oder .env)
 FMP_API_KEY = os.getenv('FMP_API_KEY', '')  # financialmodelingprep.com
@@ -19,3 +22,19 @@ CACHE_TTL_NEWS = 1800  # 30 Minuten fuer News
 FMP_BASE_URL = 'https://financialmodelingprep.com/api/v3'
 FINNHUB_BASE_URL = 'https://finnhub.io/api/v1'
 ALPHA_VANTAGE_BASE_URL = 'https://www.alphavantage.co/query'
+
+
+def validate_config():
+    """Prueft ob API-Keys konfiguriert sind und warnt bei fehlenden Keys."""
+    missing = []
+    if not FMP_API_KEY:
+        missing.append('FMP_API_KEY')
+    if not FINNHUB_API_KEY:
+        missing.append('FINNHUB_API_KEY')
+    if not ALPHA_VANTAGE_API_KEY:
+        missing.append('ALPHA_VANTAGE_API_KEY')
+    if missing:
+        logger.warning(f"Missing API keys: {', '.join(missing)}. Some data providers will be unavailable.")
+
+
+validate_config()
